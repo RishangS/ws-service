@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/segmentio/kafka-go"
@@ -22,10 +23,11 @@ var (
 	upgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
-	authClient  auth.AuthServiceClient
-	kafkaWriter *kafka.Writer
-	clients     = make(map[string]*websocket.Conn)
-	clientsMu   sync.Mutex
+	authClient     auth.AuthServiceClient
+	messagesWriter *kafka.Writer
+	persistWriter  *kafka.Writer
+	clients        = make(map[string]*websocket.Conn)
+	clientsMu      sync.Mutex
 )
 
 func main() {
@@ -45,12 +47,17 @@ func main() {
 	defer authConn.Close()
 	authClient = auth.NewAuthServiceClient(authConn)
 
-	// Kafka writer for outgoing messages
-	kafkaWriter = kafka.NewWriter(kafka.WriterConfig{
-		Brokers: []string{"localhost:9092"},
-		Topic:   "messages",
-	})
-	defer kafkaWriter.Close()
+	// Initialize Kafka writers
+	initKafkaWriters()
+	defer func() {
+		if err := messagesWriter.Close(); err != nil {
+			log.Printf("Error closing messages writer: %v", err)
+		}
+		if err := persistWriter.Close(); err != nil {
+			log.Printf("Error closing persist writer: %v", err)
+		}
+	}()
+
 	http.HandleFunc("/ws", handleWebSocket)
 	go ensureTopicExists()
 	go startKafkaConsumer()
@@ -58,9 +65,27 @@ func main() {
 	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
+func initKafkaWriters() {
+	// Writer for real-time messages
+	messagesWriter = kafka.NewWriter(kafka.WriterConfig{
+		Brokers:      []string{"localhost:9092"},
+		Topic:        "messages",
+		Balancer:     &kafka.Hash{},
+		BatchTimeout: 10 * time.Millisecond,
+	})
+
+	// Writer for persistence
+	persistWriter = kafka.NewWriter(kafka.WriterConfig{
+		Brokers:      []string{"localhost:9092"},
+		Topic:        "persist",
+		Balancer:     &kafka.Hash{},
+		BatchTimeout: 10 * time.Millisecond,
+		RequiredAcks: -1, // Ensure message is persisted
+	})
+}
+
 func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	token := r.URL.Query().Get("token")
-	log.Printf("Incoming connection with token: %s", token) // Add this
 
 	if token == "" {
 		log.Println("Rejected: No token provided")
@@ -77,6 +102,7 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	log.Printf("Incoming message %v", resp.Username)
 
 	username := resp.Username
 
@@ -89,22 +115,13 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	// Register client
-	clientsMu.Lock()
-	clients[username] = conn
-	clientsMu.Unlock()
-
-	// Remove client when they disconnect
-	defer func() {
-		clientsMu.Lock()
-		delete(clients, username)
-		clientsMu.Unlock()
-	}()
+	registerClient(username, conn)
+	defer unregisterClient(username)
 
 	// Message handling loop
 	for {
 		var msg Message
-		err := conn.ReadJSON(&msg)
-		if err != nil {
+		if err := conn.ReadJSON(&msg); err != nil {
 			log.Printf("Read error for %s: %v", username, err)
 			break
 		}
@@ -114,20 +131,56 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Publish to Kafka
-		err = kafkaWriter.WriteMessages(context.Background(),
-			kafka.Message{
-				Key:   []byte(username),
-				Value: []byte(msg.Content),
-				Headers: []kafka.Header{
-					{Key: "To", Value: []byte(msg.To)},
-				},
-			},
-		)
-		if err != nil {
-			log.Printf("Kafka write error: %v", err)
+		// Publish to both topics
+		if err := publishMessage(username, msg); err != nil {
+			log.Printf("Error publishing message: %v", err)
 		}
 	}
+}
+
+func registerClient(username string, conn *websocket.Conn) {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+	clients[username] = conn
+}
+
+func unregisterClient(username string) {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
+	delete(clients, username)
+}
+
+func publishMessage(sender string, msg Message) error {
+	// Common headers for both messages
+	headers := []kafka.Header{
+		{Key: "From", Value: []byte(sender)},
+		{Key: "To", Value: []byte(msg.To)},
+		{Key: "Timestamp", Value: []byte(time.Now().Format(time.RFC3339))},
+	}
+
+	// Publish to real-time topic
+	if err := messagesWriter.WriteMessages(context.Background(),
+		kafka.Message{
+			Key:     []byte(sender),
+			Value:   []byte(msg.Content),
+			Headers: headers,
+		},
+	); err != nil {
+		return fmt.Errorf("messages topic write error: %w", err)
+	}
+
+	// Publish to persistence topic
+	if err := persistWriter.WriteMessages(context.Background(),
+		kafka.Message{
+			Key:     []byte(sender),
+			Value:   []byte(msg.Content),
+			Headers: headers,
+		},
+	); err != nil {
+		return fmt.Errorf("persist topic write error: %w", err)
+	}
+
+	return nil
 }
 
 // Message represents the WebSocket message structure
@@ -158,6 +211,11 @@ func ensureTopicExists() {
 	topicConfigs := []kafka.TopicConfig{
 		{
 			Topic:             "messages",
+			NumPartitions:     1,
+			ReplicationFactor: 1,
+		},
+		{
+			Topic:             "persist",
 			NumPartitions:     1,
 			ReplicationFactor: 1,
 		},
