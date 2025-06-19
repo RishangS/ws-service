@@ -32,10 +32,7 @@ var (
 
 func main() {
 	// Connect to Auth Service
-	authAddr := os.Getenv("AUTH_SERVICE_ADDR")
-	if authAddr == "" {
-		authAddr = "localhost:50051" // default
-	}
+	authAddr := getEnv("AUTH_SERVICE_ADDR", "localhost:50051")
 
 	authConn, err := grpc.Dial(
 		authAddr,
@@ -59,25 +56,44 @@ func main() {
 	}()
 
 	http.HandleFunc("/ws", handleWebSocket)
+	http.HandleFunc("/health", healthCheck)
 	go ensureTopicExists()
 	go startKafkaConsumer()
 	log.Println("WebSocket service started on :8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))
 }
 
+// getEnv gets an environment variable or returns a default value
+func getEnv(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
+// healthCheck provides a health check endpoint
+func healthCheck(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
 func initKafkaWriters() {
+	kafkaBrokers := getEnv("KAFKA_BROKERS", "localhost:9092")
+	messagesTopic := getEnv("KAFKA_MESSAGES_TOPIC", "messages")
+	persistTopic := getEnv("KAFKA_PERSIST_TOPIC", "persist")
+
 	// Writer for real-time messages
 	messagesWriter = kafka.NewWriter(kafka.WriterConfig{
-		Brokers:      []string{"localhost:9092"},
-		Topic:        "messages",
+		Brokers:      []string{kafkaBrokers},
+		Topic:        messagesTopic,
 		Balancer:     &kafka.Hash{},
 		BatchTimeout: 10 * time.Millisecond,
 	})
 
 	// Writer for persistence
 	persistWriter = kafka.NewWriter(kafka.WriterConfig{
-		Brokers:      []string{"localhost:9092"},
-		Topic:        "persist",
+		Brokers:      []string{kafkaBrokers},
+		Topic:        persistTopic,
 		Balancer:     &kafka.Hash{},
 		BatchTimeout: 10 * time.Millisecond,
 		RequiredAcks: -1, // Ensure message is persisted
@@ -190,7 +206,8 @@ type Message struct {
 }
 
 func ensureTopicExists() {
-	conn, err := kafka.Dial("tcp", "localhost:9092")
+	kafkaBrokers := getEnv("KAFKA_BROKERS", "localhost:9092")
+	conn, err := kafka.Dial("tcp", kafkaBrokers)
 	if err != nil {
 		log.Fatalf("Failed to connect to Kafka: %v", err)
 	}
@@ -208,14 +225,17 @@ func ensureTopicExists() {
 	}
 	defer controllerConn.Close()
 
+	messagesTopic := getEnv("KAFKA_MESSAGES_TOPIC", "messages")
+	persistTopic := getEnv("KAFKA_PERSIST_TOPIC", "persist")
+
 	topicConfigs := []kafka.TopicConfig{
 		{
-			Topic:             "messages",
+			Topic:             messagesTopic,
 			NumPartitions:     1,
 			ReplicationFactor: 1,
 		},
 		{
-			Topic:             "persist",
+			Topic:             persistTopic,
 			NumPartitions:     1,
 			ReplicationFactor: 1,
 		},
