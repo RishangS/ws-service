@@ -4,10 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"os"
-	"strconv"
 	"sync"
 	"time"
 
@@ -57,7 +55,7 @@ func main() {
 
 	http.HandleFunc("/ws", handleWebSocket)
 	http.HandleFunc("/health", healthCheck)
-	go ensureTopicExists()
+	// go ensureTopicExists()
 	go startKafkaConsumer()
 	log.Println("WebSocket service started on :8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))
@@ -205,44 +203,44 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-func ensureTopicExists() {
-	kafkaBrokers := getEnv("KAFKA_BROKERS", "localhost:9092")
-	conn, err := kafka.Dial("tcp", kafkaBrokers)
-	if err != nil {
-		log.Fatalf("Failed to connect to Kafka: %v", err)
-	}
-	defer conn.Close()
+// func ensureTopicExists() {
+// 	kafkaBrokers := getEnv("KAFKA_BROKERS", "localhost:9092")
+// 	conn, err := kafka.Dial("tcp", kafkaBrokers)
+// 	if err != nil {
+// 		log.Fatalf("Failed to connect to Kafka: %v", err)
+// 	}
+// 	defer conn.Close()
 
-	controller, err := conn.Controller()
-	if err != nil {
-		log.Fatalf("Failed to get controller: %v", err)
-	}
+// 	controller, err := conn.Controller()
+// 	if err != nil {
+// 		log.Fatalf("Failed to get controller: %v", err)
+// 	}
 
-	var controllerConn *kafka.Conn
-	controllerConn, err = kafka.Dial("tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
-	if err != nil {
-		log.Fatalf("Failed to connect to controller: %v", err)
-	}
-	defer controllerConn.Close()
+// 	var controllerConn *kafka.Conn
+// 	controllerConn, err = kafka.Dial("tcp", net.JoinHostPort(controller.Host, strconv.Itoa(controller.Port)))
+// 	if err != nil {
+// 		log.Fatalf("Failed to connect to controller: %v", err)
+// 	}
+// 	defer controllerConn.Close()
 
-	messagesTopic := getEnv("KAFKA_MESSAGES_TOPIC", "messages")
-	persistTopic := getEnv("KAFKA_PERSIST_TOPIC", "persist")
+// 	messagesTopic := getEnv("KAFKA_MESSAGES_TOPIC", "messages")
+// 	persistTopic := getEnv("KAFKA_PERSIST_TOPIC", "persist")
 
-	topicConfigs := []kafka.TopicConfig{
-		{
-			Topic:             messagesTopic,
-			NumPartitions:     1,
-			ReplicationFactor: 1,
-		},
-		{
-			Topic:             persistTopic,
-			NumPartitions:     1,
-			ReplicationFactor: 1,
-		},
-	}
+// 	topicConfigs := []kafka.TopicConfig{
+// 		{
+// 			Topic:             messagesTopic,
+// 			NumPartitions:     1,
+// 			ReplicationFactor: 1,
+// 		},
+// 		{
+// 			Topic:             persistTopic,
+// 			NumPartitions:     1,
+// 			ReplicationFactor: 1,
+// 		},
+// 	}
 
-	err = controllerConn.CreateTopics(topicConfigs...)
-	if err != nil {
-		log.Printf("Error creating topics: %v", err)
-	}
-}
+// 	err = controllerConn.CreateTopics(topicConfigs...)
+// 	if err != nil {
+// 		log.Printf("Error creating topics: %v", err)
+// 	}
+// }
